@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>so_arm101_hardware</name>
+  <version>0.1.0</version>
+  <description>Hardware Serial Driver and Real-Time State Publisher for SO-ARM101 (STS3215 Servos)</description>
+  <maintainer email="freebird@todo.todo">freebird</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>rviz2</depend>
+  <depend>so_arm101_description</depend>
+
+  <exec_depend>python3-pyserial</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
