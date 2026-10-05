@@ -26,11 +26,12 @@ Arm_Grabbing/
 │   └── github_upload_tutorial.md  # GitHub 提交与推送教学指南
 ├── src/                        # ROS 2 功能包源码
 │   ├── so_arm101_description/   # [阶段一已完成] 真实CAD URDF/XACRO 描述、3D Mesh 与 RViz 2 可视化
-│   ├── so_arm101_moveit_config/ # [阶段二已完成] MoveIt 2 运动规划、SRDF 与控制器配置
-│   ├── so_arm101_model_based/   # [阶段二已完成] Pinocchio IK、五次多项式与 3D 8字形/圆弧轨迹生成节点
+│   ├── so_arm101_moveit_config/ # [阶段二已完成] MoveIt 2 运动规划、SRDF 与多线程控制器配置
+│   ├── so_arm101_model_based/   # [阶段二已完成] 空间数学、Pinocchio IK、五次多项式与 3D 8字形/圆弧轨迹生成
 │   ├── so_arm101_teleop_data/   # [阶段三] 仿真与实物遥操作及 LeRobot 格式数据集采集
-│   ├── so_arm101_hardware/      # [阶段四] C++ / Python STS3215 串口总线驱动与真实手眼标定闭环
+│   ├── so_arm101_hardware/      # [阶段四] STS3215 串口总线驱动、JointCalibration 适配器与硬件影子节点
 │   └── so_arm101_learning_based/# [阶段五] ACT / Diffusion Policy ROS 2 实时推理与闭环 Demo
+├── GLOSSARY.md                 # 机械臂领域核心术语表 (Domain Vocabulary)
 ├── .gitignore                  # Git 构建产物屏蔽规则
 └── README.md                   # 本文档
 ```
@@ -51,19 +52,30 @@ colcon build --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
 source install/setup.bash
 ```
 
-### 2. 启动 URDF 机器人可视化与关节滑块控制 (仿真)
+### 2. 运行自动化单元测试 (Unit Tests)
+```bash
+colcon test --event-handlers console_direct+
+colcon test-result --all
+```
+
+### 3. 启动 URDF 机器人可视化与关节滑块控制 (仿真)
 ```bash
 ros2 launch so_arm101_description display.launch.py
 ```
 
-### 3. 启动传统控制 (正逆运动学 / DLS IK / 3D 8字形轨迹规划) 仿真
+### 4. 启动传统控制 (正逆运动学 / DLS IK / 3D 8字形轨迹规划) 仿真
 ```bash
 ros2 launch so_arm101_model_based kinematics_sim.launch.py
 ```
 
-### 4. 启动 MoveIt 2 路径规划与 RViz 2 交互界面 (仿真)
+### 5. 启动 MoveIt 2 路径规划与 RViz 2 交互界面 (仿真)
 ```bash
 ros2 launch so_arm101_moveit_config demo.launch.py
+```
+
+### 6. 启动真实硬件驱动 / 仿真影子同步 (Hardware Shadow)
+```bash
+ros2 launch so_arm101_hardware hardware_shadow.launch.py port:=/dev/ttyUSB0
 ```
 
 ---

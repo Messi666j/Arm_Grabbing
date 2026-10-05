@@ -1,72 +1,100 @@
+"""
+Kinematics Solver for SO-ARM101 Robotic Manipulator.
+
+Integrates Pinocchio rigid-body dynamics with numerical Damped Least Squares (DLS)
+Inverse Kinematics, Jacobian calculations, and manipulability analysis.
+"""
+
 import os
 import subprocess
+from typing import Optional, Tuple
 import numpy as np
 import pinocchio as pin
 
-def rpy_to_rotation_matrix(roll, pitch, yaw):
-    """Convert Roll-Pitch-Yaw angles (in radians) to 3x3 Rotation Matrix (XYZ convention)."""
-    cr = np.cos(roll)
-    sr = np.sin(roll)
-    cp = np.cos(pitch)
-    sp = np.sin(pitch)
-    cy = np.cos(yaw)
-    sy = np.sin(yaw)
+from so_arm101_model_based.spatial_math import (
+    rpy_to_rotation_matrix,
+    rotation_matrix_to_rpy,
+    normalize_angles,
+)
 
-    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
-    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+# Canonical SO-ARM101 Joint Names
+CANONICAL_JOINT_NAMES = [
+    'shoulder_pan',
+    'shoulder_lift',
+    'elbow_flex',
+    'wrist_flex',
+    'wrist_roll',
+    'gripper'
+]
 
-    return Rz @ Ry @ Rx
+ARM_DOF = 5
+TOTAL_DOF = 6
 
-def rotation_matrix_to_rpy(R):
-    """Convert 3x3 Rotation Matrix to Roll-Pitch-Yaw angles (XYZ convention)."""
-    pitch = np.arctan2(-R[2, 0], np.sqrt(R[0, 0]**2 + R[1, 0]**2))
-    if np.abs(np.cos(pitch)) > 1e-6:
-        roll = np.arctan2(R[2, 1], R[2, 2])
-        yaw = np.arctan2(R[1, 0], R[0, 0])
-    else:
-        roll = 0.0
-        yaw = np.arctan2(-R[0, 1], R[1, 1])
-    return np.array([roll, pitch, yaw])
+
+def find_urdf_xacro_path() -> str:
+    """Find the URDF/Xacro path across ROS install space or workspace src tree."""
+    # 1. Try ament index (installed environment)
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        pkg_share = get_package_share_directory('so_arm101_description')
+        candidate = os.path.join(pkg_share, 'urdf', 'so_arm101.urdf.xacro')
+        if os.path.exists(candidate):
+            return candidate
+    except Exception:
+        pass
+
+    # 2. Search workspace directories by walking upwards
+    curr = os.path.abspath(__file__)
+    for _ in range(6):
+        curr = os.path.dirname(curr)
+        candidate = os.path.join(curr, 'src', 'so_arm101_description', 'urdf', 'so_arm101.urdf.xacro')
+        if os.path.exists(candidate):
+            return candidate
+        candidate_direct = os.path.join(curr, 'so_arm101_description', 'urdf', 'so_arm101.urdf.xacro')
+        if os.path.exists(candidate_direct):
+            return candidate_direct
+
+    raise FileNotFoundError("Could not locate so_arm101.urdf.xacro in install or source space.")
+
 
 class SOArm101Kinematics:
     """
-    SO-ARM101 机械臂正/逆运动学求解器与动力学基础类 (基于 Pinocchio & DLS 数值法)
+    Kinematics solver for SO-ARM101 using Pinocchio.
+    Provides forward kinematics, Jacobian computation, manipulability analysis,
+    and Damped Least Squares (DLS) numerical inverse kinematics.
     """
 
-    def __init__(self, xacro_path=None, urdf_str=None):
+    def __init__(self, xacro_path: Optional[str] = None, urdf_str: Optional[str] = None):
         if urdf_str is None:
             if xacro_path is None:
-                try:
-                    from ament_index_python.packages import get_package_share_directory
-                    pkg_share = get_package_share_directory('so_arm101_description')
-                    xacro_path = os.path.join(pkg_share, 'urdf', 'so_arm101.urdf.xacro')
-                except Exception:
-                    pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                    xacro_path = os.path.join(pkg_dir, 'so_arm101_description', 'urdf', 'so_arm101.urdf.xacro')
-            
+                xacro_path = find_urdf_xacro_path()
+
             if not os.path.exists(xacro_path):
                 raise FileNotFoundError(f"URDF Xacro file not found at: {xacro_path}")
-            
+
             cmd = ['xacro', xacro_path]
             urdf_str = subprocess.check_output(cmd).decode('utf-8')
 
         self.model = pin.buildModelFromXML(urdf_str)
         self.data = self.model.createData()
 
+        # Resolve End-Effector Tool Frame
         self.tool_frame_id = self.model.getFrameId('gripper_frame_link')
         if self.tool_frame_id >= len(self.model.frames):
             self.tool_frame_id = self.model.getFrameId('gripper_link')
+            if self.tool_frame_id >= len(self.model.frames):
+                self.tool_frame_id = len(self.model.frames) - 1
 
         self.num_joints = self.model.nq
         self.q_min = self.model.lowerPositionLimit
         self.q_max = self.model.upperPositionLimit
 
-    def forward_kinematics(self, q):
+    def forward_kinematics(self, q: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        计算正运动学 (FK)
-        :param q: 关节角度向量 numpy array [q1, q2, q3, q4, q5, q_gripper]
-        :return: pos (x,y,z), R (3x3 rotation matrix), rpy (roll, pitch, yaw)
+        Compute Forward Kinematics (FK) for the end-effector.
+
+        :param q: Joint configuration vector [q1..q6]
+        :return: (pos [x,y,z], rotation_matrix [3x3], rpy [roll, pitch, yaw])
         """
         q_arr = np.asarray(q, dtype=np.float64)
         pin.forwardKinematics(self.model, self.data, q_arr)
@@ -79,50 +107,48 @@ class SOArm101Kinematics:
 
         return pos, R, rpy
 
-    def compute_jacobian(self, q):
-        """
-        计算末端执行器 6D 雅可比矩阵
-        """
+    def compute_jacobian(self, q: np.ndarray) -> np.ndarray:
+        """Compute the 6D geometric Jacobian matrix for the end-effector in world frame."""
         q_arr = np.asarray(q, dtype=np.float64)
         pin.computeJointJacobians(self.model, self.data, q_arr)
         pin.updateFramePlacements(self.model, self.data)
 
-        J = pin.getFrameJacobian(self.model, self.data, self.tool_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
-        return J
+        return pin.getFrameJacobian(
+            self.model, self.data, self.tool_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+        )
 
-    def compute_manipulability(self, q):
-        """
-        计算 Yoshikawa 操纵度 (Manipulability Index)，用于衡量机械臂是否接近奇异点
-        """
-        J = self.compute_jacobian(q)[:3, :5] # 前5个旋转关节位置雅可比
+    def compute_manipulability(self, q: np.ndarray) -> float:
+        """Compute Yoshikawa Manipulability Index for the 5-DOF positioning arm."""
+        J = self.compute_jacobian(q)[:3, :ARM_DOF]
         JJT = J @ J.T
         det = np.linalg.det(JJT)
-        return np.sqrt(max(0.0, det))
+        return float(np.sqrt(max(0.0, det)))
 
     def inverse_kinematics_dls(
         self,
-        target_pos,
-        target_rpy=None,
-        target_R=None,
-        q_init=None,
-        max_iter=150,
-        eps_pos=1e-4,
-        eps_rot=1e-3,
-        damping=1e-3,
-        position_only=True
-    ):
+        target_pos: np.ndarray,
+        target_rpy: Optional[np.ndarray] = None,
+        target_R: Optional[np.ndarray] = None,
+        q_init: Optional[np.ndarray] = None,
+        max_iter: int = 150,
+        eps_pos: float = 1e-4,
+        eps_rot: float = 1e-3,
+        damping: float = 1e-3,
+        position_only: bool = True
+    ) -> Tuple[np.ndarray, bool, float, float]:
         """
-        阻尼最小二乘法 (Damped Least Squares, DLS) 逆运动学求解
-        :param target_pos: 目标位置 [x, y, z]
-        :param target_rpy: 目标姿态 [roll, pitch, yaw] (或传入 target_R)
-        :param target_R: 目标 3x3 旋转矩阵
-        :param q_init: 初始关节角度向量 (默认为 neutral)
-        :param max_iter: 最大迭代次数
-        :param eps_pos: 位置容差 (米)
-        :param eps_rot: 姿态容差 (弧度)
-        :param damping: 阻尼因子 $\lambda$ (防止在奇异构型下求逆爆炸)
-        :param position_only: 是否优先约束 3D 笛卡尔位置 (适用于 5-DOF 机械臂空间轨迹精准追踪)
-        :return: (q_sol, success, pos_err_val, rot_err_val)
+        Damped Least Squares (DLS) numerical Inverse Kinematics solver.
+
+        :param target_pos: Target 3D Cartesian position [x, y, z] (m)
+        :param target_rpy: Optional target orientation in RPY angles (rad)
+        :param target_R: Optional target 3x3 rotation matrix
+        :param q_init: Initial joint angles guess (default: neutral)
+        :param max_iter: Maximum iterations
+        :param eps_pos: Position tolerance (m)
+        :param eps_rot: Orientation tolerance (rad)
+        :param damping: Levenberg-Marquardt damping factor
+        :param position_only: If True, prioritize 3D position convergence
+        :return: (q_sol, success, pos_error, rot_error)
         """
         if q_init is None:
             q = pin.neutral(self.model)
@@ -134,22 +160,23 @@ class SOArm101Kinematics:
 
         target_p = np.asarray(target_pos, dtype=np.float64)
         success = False
-
         pos_err_val = 0.0
         rot_err_val = 0.0
+
+        damping_sq = damping ** 2
 
         for i in range(max_iter):
             curr_pos, curr_R, _ = self.forward_kinematics(q)
 
-            # 位置误差
+            # Position error
             pos_err = target_p - curr_pos
-            pos_err_val = np.linalg.norm(pos_err)
+            pos_err_val = float(np.linalg.norm(pos_err))
 
-            # 姿态误差
+            # Orientation error
             if target_R is not None:
                 R_err = curr_R.T @ target_R
                 rot_err = pin.log3(R_err)
-                rot_err_val = np.linalg.norm(rot_err)
+                rot_err_val = float(np.linalg.norm(rot_err))
             else:
                 rot_err = np.zeros(3)
                 rot_err_val = 0.0
@@ -158,12 +185,10 @@ class SOArm101Kinematics:
                 if pos_err_val < eps_pos:
                     success = True
                     break
-                
-                # 3D 位置雅可比 (3 x 5)
-                J_pos = self.compute_jacobian(q)[:3, :5]
-                JJT = J_pos @ J_pos.T
-                dls_mat = JJT + (damping ** 2) * np.eye(3)
-                dq5 = J_pos.T @ np.linalg.solve(dls_mat, pos_err)
+
+                J_pos = self.compute_jacobian(q)[:3, :ARM_DOF]
+                dls_mat = (J_pos @ J_pos.T) + damping_sq * np.eye(3)
+                dq_arm = J_pos.T @ np.linalg.solve(dls_mat, pos_err)
 
             else:
                 if pos_err_val < eps_pos and rot_err_val < eps_rot:
@@ -171,20 +196,20 @@ class SOArm101Kinematics:
                     break
 
                 err_6d = np.concatenate([pos_err, rot_err])
-                J_6d = self.compute_jacobian(q)[:6, :5]
-                JJT = J_6d @ J_6d.T
-                dls_mat = JJT + (damping ** 2) * np.eye(6)
-                dq5 = J_6d.T @ np.linalg.solve(dls_mat, err_6d)
+                J_6d = self.compute_jacobian(q)[:6, :ARM_DOF]
+                dls_mat = (J_6d @ J_6d.T) + damping_sq * np.eye(6)
+                dq_arm = J_6d.T @ np.linalg.solve(dls_mat, err_6d)
 
             dq = np.zeros(self.num_joints)
-            dq[:5] = dq5
+            dq[:ARM_DOF] = dq_arm
 
-            # 动态步长调节
+            # Adaptive step size
             step_size = 0.5 if i < 30 else 0.8
             q = q + step_size * dq
-
-            # 关节限位保护
             q = np.clip(q, self.q_min, self.q_max)
 
-        q[5] = np.clip(q[5], self.q_min[5], self.q_max[5])
+        # Clip gripper joint if present
+        if self.num_joints > ARM_DOF:
+            q[ARM_DOF] = np.clip(q[ARM_DOF], self.q_min[ARM_DOF], self.q_max[ARM_DOF])
+
         return q, success, pos_err_val, rot_err_val
